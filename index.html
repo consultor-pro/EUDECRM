@@ -2941,12 +2941,33 @@ async function eloNuvemSessao() {
   } catch (e) { return null; }
 }
 
+// O que vai para a nuvem precisa ser leve: a foto de perfil vai junto (ela é pequena,
+// ~50KB, e precisa aparecer no Semáforo em qualquer aparelho); anexos da aba
+// Informações NUNCA vão — ficam só no aparelho onde foram colocados.
+function dadosLevesParaNuvem(){
+  const usuarios = (usersList || []).map(u => {
+    const foto = (typeof avatarSrc === 'function' ? avatarSrc(u) : '') || '';
+    return Object.assign({}, u, { avatar: foto });
+  });
+  const posts = (infoPosts || []).map(p => p && p.fileUrl ? Object.assign({}, p, { fileUrl: '', fileName: '', fileType: '' }) : p);
+  return { db, usersList: usuarios, brand, notifications, infoPosts: posts };
+}
+// Ao receber da nuvem: se este aparelho ainda tem o anexo antigo de uma publicação, mantém.
+function manterAnexosLocais(postsDaNuvem){
+  const locais = {};
+  (infoPosts || []).forEach(p => { if (p && p.id && p.fileUrl) locais[p.id] = p; });
+  return (postsDaNuvem || []).map(p => {
+    const l = p && locais[p.id];
+    return (l && !p.fileUrl) ? Object.assign({}, p, { fileUrl: l.fileUrl, fileName: l.fileName, fileType: l.fileType }) : p;
+  });
+}
+
 async function enviarParaNuvem() {
   if (!supabaseClient) return;
   if (!(await eloNuvemSessao())) { atualizarBadgeNuvem('☁️ Nuvem desconectada (dados só neste aparelho)'); return; }
   try {
     const agora = marcarModificacaoLocal();
-    const dados = { db, usersList, brand, notifications, infoPosts };
+    const dados = dadosLevesParaNuvem();
     const { error } = await supabaseClient.from('crm_snapshot').upsert({
       equipe_id: EQUIPE_ID_NUVEM,
       dados,
@@ -2987,7 +3008,7 @@ async function carregarDaNuvem() {
       if (nuvem.usersList) usersList = nuvem.usersList;
       if (nuvem.brand) brand = nuvem.brand;
       if (nuvem.notifications) notifications = nuvem.notifications;
-      if (nuvem.infoPosts) infoPosts = nuvem.infoPosts;
+      if (nuvem.infoPosts) infoPosts = manterAnexosLocais(nuvem.infoPosts);
 
       persistirChave(KEY_DB, JSON.stringify(db), db);
       persistirChave(KEY_USERS, JSON.stringify(usersList), usersList);
@@ -6440,19 +6461,26 @@ function closeFsPreviewModal(){
 
 function openNewInfoModal(){
   openModal(`
-    <div class="between"><h2>Nova Publicação de Arquivo / Comunicado</h2><button class="btn" onclick="closeModal()">✕</button></div>
+    <div class="between"><h2>${ANEXOS_ATIVOS ? 'Nova Publicação de Arquivo / Comunicado' : 'Nova Publicação / Comunicado'}</h2><button class="btn" onclick="closeModal()">✕</button></div>
     <div class="field"><label>Título</label><input id="infoTitle" placeholder="Ex: Tabela de Vendas Vigente"></div>
     <div class="field"><label>Texto / Descrição</label><textarea id="infoDesc" style="min-height:90px"></textarea></div>
-    <div class="field"><label>Link Externo Opcional</label><input type="url" id="infoLinkUrl" placeholder="https://..."></div>
-    <div class="field">
+    <div class="field"><label>${ANEXOS_ATIVOS ? 'Link Externo Opcional' : 'Link (opcional)'}</label><input type="url" id="infoLinkUrl" placeholder="https://..."></div>
+    ${ANEXOS_ATIVOS ? `<div class="field">
       <label>📁 Anexar Arquivo</label>
       <input type="file" id="infoFileInput" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.key,image/*,video/*">
-    </div>
+    </div>` : `<p class="muted" id="infoDicaSemAnexo" style="font-size:12.5px;margin:-4px 0 12px">${DICA_SEM_ANEXO}</p>`}
     <button class="btn primary" id="btnPublishInfo" onclick="saveNewInfoPost()">Publicar no Mural</button>
   `);
 }
 
 const TAMANHO_MAXIMO_ANEXO = 5 * 1024 * 1024; // 5MB — trava dura, vale pra qualquer tipo de arquivo
+
+// CRM LEVE: com "false", a aba Informações aceita só texto e link (nada de arquivo, foto
+// ou vídeo guardado dentro do CRM). A foto de perfil continua funcionando. Publicações
+// antigas que já tinham anexo continuam abrindo normalmente e podem ter o anexo removido.
+// Para religar os anexos um dia, basta trocar para "true".
+const ANEXOS_ATIVOS = false;
+const DICA_SEM_ANEXO = 'Para compartilhar foto, vídeo ou arquivo, cole o link dele no campo acima (Google Drive, YouTube, Canva...).';
 
 function saveNewInfoPost(){
   const title = document.getElementById('infoTitle')?.value.trim();
@@ -6464,7 +6492,7 @@ function saveNewInfoPost(){
   const btn = document.getElementById('btnPublishInfo');
   if(btn) btn.disabled = true;
 
-  const file = fileInput && fileInput.files && fileInput.files[0];
+  const file = ANEXOS_ATIVOS && fileInput && fileInput.files && fileInput.files[0];
 
   if(!file){
     infoPosts.unshift({
@@ -6559,15 +6587,15 @@ function openEditInfoModal(id){
           <span style="flex:1;font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(post.fileName||'Arquivo anexo')}</span>
         </div>
         <label style="display:flex;align-items:center;gap:8px;margin-top:8px;cursor:pointer;font-weight:400">
-          <input type="checkbox" id="infoEditRemoverAnexo" style="width:auto" onchange="document.getElementById('infoEditFileInput').disabled = this.checked">
+          <input type="checkbox" id="infoEditRemoverAnexo" style="width:auto" onchange="const f = document.getElementById('infoEditFileInput'); if (f) f.disabled = this.checked">
           Remover este anexo
         </label>
       </div>
     ` : ''}
-    <div class="field">
+    ${ANEXOS_ATIVOS ? `<div class="field">
       <label>📁 ${temAnexo ? 'Substituir Anexo (opcional)' : 'Anexar Arquivo'}</label>
       <input type="file" id="infoEditFileInput" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.key,image/*,video/*">
-    </div>
+    </div>` : `<p class="muted" style="font-size:12.5px;margin:-4px 0 12px">${DICA_SEM_ANEXO}</p>`}
     <button class="btn primary" id="btnSaveEditInfo" onclick="saveEditInfoPost('${id}')">Salvar Alterações</button>
   `);
 }
@@ -6586,7 +6614,7 @@ function saveEditInfoPost(id){
   const btn = document.getElementById('btnSaveEditInfo');
   if(btn) btn.disabled = true;
 
-  const file = fileInput && fileInput.files && fileInput.files[0];
+  const file = ANEXOS_ATIVOS && fileInput && fileInput.files && fileInput.files[0];
 
   // Limpa o anexo antigo do IndexedDB sempre que ele for substituído ou removido
   // (nunca deixa arquivo órfão ocupando espaço sem estar mais ligado a nenhum post).
